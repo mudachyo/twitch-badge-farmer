@@ -2,6 +2,8 @@
 
 Собирает бесплатные глобальные бейджи Twitch за просмотр подходящих трансляций
 
+Это форк [FrostyDeFreeze/twitch-badge-farmer](https://github.com/FrostyDeFreeze/twitch-badge-farmer)
+
 [English version](README.md)
 
 ## Установка

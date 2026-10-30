@@ -2,6 +2,8 @@
 
 Collects free global Twitch badges by watching eligible streams
 
+This is a fork of [FrostyDeFreeze/twitch-badge-farmer](https://github.com/FrostyDeFreeze/twitch-badge-farmer)
+
 [Русская версия](README.ru.md)
 
 ## Installation
