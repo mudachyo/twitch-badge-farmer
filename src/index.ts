@@ -80,7 +80,11 @@ async function main() {
 	if (mode === 'list') {
 		const twitch = new Twitch(config, controller.signal)
 		const [catalog, globals, owned] = await Promise.all([
-			fetchJson('https://api.streamdatabase.com/events', { signal: controller.signal, label: 'StreamDatabase', headers: { 'User-Agent': USER_AGENT } }),
+			fetchJson('https://api.streamdatabase.com/events', {
+				signal: controller.signal,
+				label: 'StreamDatabase',
+				headers: { 'User-Agent': USER_AGENT }
+			}),
 			twitch.globalBadges(),
 			twitch.badges()
 		])
