@@ -24,12 +24,13 @@ interface GqlBody {
 interface StreamOptions {
 	exclude?: Set<string>
 	drop?: DropReference | null | undefined
+	report?: (message: string) => void | undefined
 }
 
 import { fetchResponse, fetchJson, fetchText } from './fetch.ts'
 import { matchesDrop } from './catalog.ts'
 
-const USER_AGENT =
+export const USER_AGENT =
 	'Mozilla/5.0 (iPhone; CPU iPhone OS 18_6_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/144.1 Mobile/15E148 Safari/604.1'
 const QUERIES: Partial<Record<keyof GqlData, string>> = {
 	PlaybackAccessToken: 'ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9',
@@ -37,6 +38,9 @@ const QUERIES: Partial<Record<keyof GqlData, string>> = {
 	DropsHighlightService_AvailableDrops: '782dad0f032942260171d2d80a654f88bdd0c5a9dddc392e9bc92218a0f42d20',
 	DropsPage_ClaimDropRewards: 'a455deea71bdc9015b78eb49f4acfbce8baa7ccbedd28e549bb025bd0f751930'
 }
+
+// bounded number of 100-stream pages requested per eligible category during channel discovery
+const MAX_STREAMS_PAGES = 5
 
 function cdnUrl(value: string, base: string | URL) {
 	const url = new URL(value, base)
@@ -216,29 +220,38 @@ export class Twitch {
 
 		for (const channels of batches(task.channels.map(channel => channel.id))) {
 			for (const categories of batches(task.categoryIds)) {
-				const url = new URL('https://api.twitch.tv/helix/streams')
+				// popular categories list more streams than fits into one page during live events
+				let cursor: string | undefined
 
-				url.searchParams.set('first', '100')
-				url.searchParams.set('type', 'live')
+				for (let page = 0; page < MAX_STREAMS_PAGES; page++) {
+					const url = new URL('https://api.twitch.tv/helix/streams')
 
-				for (const id of channels) url.searchParams.append('user_id', id)
-				for (const id of categories) url.searchParams.append('game_id', id)
+					url.searchParams.set('first', '100')
+					url.searchParams.set('type', 'live')
+					if (cursor) url.searchParams.set('after', cursor)
 
-				const data = await fetchJson<{ data?: Stream[] }>(url, {
-					headers: this.headers(),
-					fatalAuth: true,
-					signal: this.signal,
-					label: 'Helix streams'
-				})
+					for (const id of channels) url.searchParams.append('user_id', id)
+					for (const id of categories) url.searchParams.append('game_id', id)
 
-				if (!Array.isArray(data.data)) throw new Error('Helix: unsupported stream list format')
+					const data = await fetchJson<{ data?: Stream[]; pagination?: { after?: string } }>(url, {
+						headers: this.headers(),
+						fatalAuth: true,
+						signal: this.signal,
+						label: 'Helix streams'
+					})
 
-				for (const stream of data.data) {
-					if (stream.type !== 'live' || !stream.id || !stream.user_id || !stream.user_login) continue
-					if (task.categoryIds.length && !task.categoryIds.includes(stream.game_id)) continue
-					if (task.channels.length && !task.channels.some(channel => channel.id === stream.user_id)) continue
+					if (!Array.isArray(data.data)) throw new Error('Helix: unsupported stream list format')
 
-					result.set(stream.user_id, stream)
+					for (const stream of data.data) {
+						if (stream.type !== 'live' || !stream.id || !stream.user_id || !stream.user_login) continue
+						if (task.categoryIds.length && !task.categoryIds.includes(stream.game_id)) continue
+						if (task.channels.length && !task.channels.some(channel => channel.id === stream.user_id)) continue
+
+						result.set(stream.user_id, stream)
+					}
+
+					cursor = data.pagination?.after
+					if (!cursor) break
 				}
 			}
 		}
@@ -246,17 +259,32 @@ export class Twitch {
 		return [...result.values()].sort((left, right) => (right.viewer_count || 0) - (left.viewer_count || 0))
 	}
 
-	async selectStream(task: Task, { exclude = new Set(), drop: expectedDrop }: StreamOptions = {}): Promise<SelectedStream | null> {
+	async selectStream(task: Task, { exclude = new Set(), drop: expectedDrop, report }: StreamOptions = {}): Promise<SelectedStream | null> {
 		const streams = await this.streams(task)
+
+		if (report && !streams.length) {
+			report(
+				task.channels.length
+					? task.channels.map(channel => channel.login).join(', ') + (task.channels.length === 1 ? ' is not live' : ' are not live')
+					: 'no live streams in the eligible categories'
+			)
+		}
+
+		let checked = 0
+		let campaignsSeen = 0
 
 		for (const stream of streams) {
 			if (exclude.has(stream.user_id)) continue
+
+			checked++
 
 			const data = await this.gql('DropsHighlightService_AvailableDrops', { channelID: stream.user_id })
 			const campaigns = data.channel?.viewerDropCampaigns
 
 			if (data.channel === null || campaigns === null) continue
 			if (!Array.isArray(campaigns)) throw new Error('Twitch Drops: campaign list unavailable for ' + stream.user_login)
+
+			campaignsSeen += campaigns.length
 
 			for (const campaign of campaigns) {
 				if (campaign.game && campaign.game.id !== stream.game_id) continue
@@ -270,6 +298,12 @@ export class Twitch {
 					return { ...stream, drop: { id: drop.id, campaignId: campaign.id, requiredMinutesWatched: drop.requiredMinutesWatched } }
 				}
 			}
+		}
+
+		if (report && streams.length) {
+			report(
+				`${checked}/${streams.length} live stream${streams.length === 1 ? '' : 's'} checked, ${campaignsSeen} Drops campaign${campaignsSeen === 1 ? '' : 's'} reported by Twitch, none grants this badge`
+			)
 		}
 
 		return null

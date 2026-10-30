@@ -126,7 +126,12 @@ function restrictions(availability: Availability) {
 }
 
 export function matchesDrop(task: Task, campaign: Campaign, drop: Drop, now = Date.now()) {
-	const names = [task.title, task.rewardTitle].filter(Boolean).map(name => name.trim().toLowerCase())
+	const normalizate = (value: string) =>
+		value
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, ' ')
+			.trim()
+	const names = [task.title, task.rewardTitle].filter(Boolean).map(name => normalizate(name))
 
 	return (
 		(!campaign.startAt || Date.parse(campaign.startAt) <= now) &&
@@ -138,7 +143,17 @@ export function matchesDrop(task: Task, campaign: Campaign, drop: Drop, now = Da
 		drop.self?.hasPreconditionsMet !== false &&
 		Date.parse(drop.startAt) <= now &&
 		Date.parse(drop.endAt) > now &&
-		drop.benefitEdges?.some(edge => typeof edge.benefit?.name === 'string' && names.includes(edge.benefit.name.trim().toLowerCase()))
+		// Twitch names drop rewards by the short reward title (e.g. "Alpha Chat"), which may differ from
+		// the full badge title, so accept a word-boundary partial match as well as an exact one
+		drop.benefitEdges?.some(
+			edge =>
+				typeof edge.benefit?.name === 'string' &&
+				names.some(name => {
+					const reward = normalizate(edge.benefit!.name!)
+
+					return reward.length > 2 && (name === reward || (' ' + name + ' ').includes(' ' + reward + ' '))
+				})
+		)
 	)
 }
 

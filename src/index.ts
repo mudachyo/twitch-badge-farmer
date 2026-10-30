@@ -4,7 +4,7 @@ import { readConfig, validateConfig } from './config.ts'
 import { generateToken } from './gen-token.ts'
 import { buildTasks, describeSkipped } from './catalog.ts'
 import { fetchJson } from './fetch.ts'
-import { Twitch } from './twitch.ts'
+import { USER_AGENT, Twitch } from './twitch.ts'
 import { Collector } from './collector.ts'
 import { loadState, saveState } from './state.ts'
 import { createLogger } from './logger.ts'
@@ -80,7 +80,7 @@ async function main() {
 	if (mode === 'list') {
 		const twitch = new Twitch(config, controller.signal)
 		const [catalog, globals, owned] = await Promise.all([
-			fetchJson('https://api.streamdatabase.com/events', { signal: controller.signal, label: 'StreamDatabase' }),
+			fetchJson('https://api.streamdatabase.com/events', { signal: controller.signal, label: 'StreamDatabase', headers: { 'User-Agent': USER_AGENT } }),
 			twitch.globalBadges(),
 			twitch.badges()
 		])

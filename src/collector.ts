@@ -41,10 +41,11 @@ interface ActiveTask {
 
 import { buildTasks, describeSkipped } from './catalog.ts'
 import { fetchJson } from './fetch.ts'
+import { USER_AGENT } from './twitch.ts'
 
 export const WATCH_INTERVAL = 20_000
 
-const IDLE_INTERVAL = 180_000
+const IDLE_INTERVAL = 300_000
 const INVENTORY_INTERVAL = 120_000
 const CATALOG_INTERVAL = 900_000
 const RETRY_INTERVAL = 900_000
@@ -60,6 +61,13 @@ function conditionSignature(task: Task) {
 		[...task.categoryIds].sort(),
 		task.channels.map(channel => channel.id).sort()
 	])
+}
+
+// a viewing attempt cannot succeed when the window left cannot fit the unmet viewing time and confirmation grace
+function feasible(task: Task, now: number) {
+	const remaining = Math.max(0, task.minutes - (task.serverMinutes || 0)) * 60_000
+
+	return now + remaining + CONFIRMATION_GRACE <= task.endAt
 }
 
 export class Collector {
@@ -144,7 +152,11 @@ export class Collector {
 
 			try {
 				const [data, globals] = await Promise.all([
-					fetchJson('https://api.streamdatabase.com/events', { signal: this.signal, label: 'StreamDatabase' }),
+					fetchJson('https://api.streamdatabase.com/events', {
+						signal: this.signal,
+						label: 'StreamDatabase',
+						headers: { 'User-Agent': USER_AGENT }
+					}),
 					this.twitch.globalBadges()
 				])
 				const { tasks, skipped } = buildTasks(data, this.owned, now, globals)
@@ -194,7 +206,7 @@ export class Collector {
 		return true
 	}
 
-	async finish(status: AttemptStatus, now: number, deferMs = 0) {
+	async finish(status: AttemptStatus, now: number, deferMs = 0, diagnostic = '') {
 		const { task } = this.active!
 		const attempt = this.state.attempts[task.key]!
 
@@ -212,13 +224,13 @@ export class Collector {
 				error: 'repeated viewing failures',
 				'expired-or-unavailable': 'badge expired or requirements no longer available'
 			}
-			const reason = reasons[status] || status
+			const reason = (reasons[status] || status) + (diagnostic ? ' | ' + diagnostic : '')
 
 			const message = `${task.title} | ${reason}${deferMs ? ' | Retrying in ' + Math.ceil(deferMs / 1000) + 's' : ''}`
 
 			if (status === 'error' || status === 'unconfirmed') this.log.warn(message)
-			// waiting is reported once when the queue becomes idle
-			else if (status !== 'waiting') this.log.log({ tag: 'WAIT', message })
+			// staying idle is detailed here at the transition; afterwards the idle message covers the wait
+			else this.log.log({ tag: 'WAIT', message })
 			this.log.debug(`[VIEWING] ${task.key}: ${status} | ${reason}`)
 		}
 
@@ -283,6 +295,13 @@ export class Collector {
 				this.log.debug('[VIEWING] Requirements changed: ' + task.key)
 			}
 
+			// stops an attempt that can no longer finish inside the eligibility window
+			if (!feasible(task, now)) {
+				await this.finish('expired-or-unavailable', now, 0, 'not enough time left to complete viewing')
+
+				return 0
+			}
+
 			this.active.task = task
 		}
 
@@ -293,16 +312,18 @@ export class Collector {
 				tasks = buildTasks(this.catalog, this.owned, this.now(), this.globals, this.dropCampaigns).tasks
 			}
 
-			const available = tasks.filter(task => (this.state.attempts[task.key]?.deferUntil || 0) <= now)
+			const available = tasks.filter(task => (this.state.attempts[task.key]?.deferUntil || 0) <= now && feasible(task, now))
 			const resumed = available.find(task => task.key === this.state.active)
 			const task = resumed && (resumed.serverMinutes || !available[0]?.serverMinutes) ? resumed : available[0]
 
 			if (!task) {
-				return this.idle(
-					(tasks.length ? 'No eligible live streams' : 'No unearned badges available') +
-						` | Checking again in ${IDLE_INTERVAL / 60_000} min`,
-					IDLE_INTERVAL
-				)
+				const reason = !tasks.length
+					? 'No unearned badges available'
+					: tasks.some(rest => feasible(rest, now))
+						? 'No eligible live streams'
+						: 'No badges left with enough time to complete viewing'
+
+				return this.idle(`${reason} | Checking again in ${IDLE_INTERVAL / 60_000} min`, IDLE_INTERVAL)
 			}
 
 			this.idleMessage = ''
@@ -375,8 +396,16 @@ export class Collector {
 
 			if (!active.stream || now >= active.nextStream) {
 				let stream = null
+				// explains in logs why eligible streams were rejected, see the Wait entry when nothing matches
+				const diagnostics: string[] = []
 				const exclude = new Set([...active.failedChannels].filter(([, until]) => until > now).map(([id]) => id))
-				const options = { exclude, drop: active.drop }
+				const options = {
+					exclude,
+					drop: active.drop,
+					report: (message: string) => {
+						diagnostics.push(message)
+					}
+				}
 
 				if (active.stream && !active.rotate && !exclude.has(active.stream!.user_id)) {
 					stream = await this.twitch.selectStream(
@@ -403,7 +432,9 @@ export class Collector {
 				}
 
 				if (!stream) {
-					await this.finish('waiting', this.now(), IDLE_INTERVAL)
+					for (const message of diagnostics) this.log.debug('[TWITCH] ' + message)
+
+					await this.finish('waiting', this.now(), IDLE_INTERVAL, diagnostics[diagnostics.length - 1] || '')
 
 					return 0
 				}
